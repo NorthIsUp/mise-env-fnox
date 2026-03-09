@@ -2,6 +2,9 @@
 
 A [mise](https://mise.jdx.dev) env plugin that loads secrets from [fnox](https://github.com/jdx/fnox) into your development environment.
 
+> [!CAUTION]
+> I am not sure this plugin is a good idea. fnox was built as a separate CLI for a reason. I would probably advise avoiding this.
+
 ## Installation
 
 Add the plugin to your project's `mise.toml`:
