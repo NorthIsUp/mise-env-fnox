@@ -28,31 +28,47 @@ function PLUGIN:MiseEnv(ctx)
         return {cacheable = true, watch_files = {}, env = {}}
     end
 
-    local command = fnox_bin .. " export --format json"
+    local profile_flag = ""
     if profile then
-        command = command .. " --profile " .. profile
+        profile_flag = " --profile " .. profile
     end
-
-    local ok, output = pcall(function()
-        return cmd.exec(command)
-    end)
-
-    if not ok then
-        print("[fnox] warning: `" .. command .. "` failed: " .. tostring(output))
-        return {cacheable = true, watch_files = config_files, env = {}}
-    end
-
-    local decode_ok, data = pcall(json.decode, output)
-    if not decode_ok then
-        print("[fnox] warning: failed to parse JSON from `" .. command .. "`: " .. tostring(data))
-        return {cacheable = true, watch_files = config_files, env = {}}
-    end
-
-    local secrets = data.secrets or {}
 
     local env_vars = {}
-    for key, value in pairs(secrets) do
-        table.insert(env_vars, {key = key, value = value})
+
+    -- export secrets
+    local export_cmd = fnox_bin .. " export --format json" .. profile_flag
+    local ok, output = pcall(function()
+        return cmd.exec(export_cmd)
+    end)
+    if ok then
+        local decode_ok, data = pcall(json.decode, output)
+        if decode_ok then
+            for key, value in pairs(data.secrets or {}) do
+                table.insert(env_vars, {key = key, value = value})
+            end
+        else
+            print("[fnox] warning: failed to parse JSON from `" .. export_cmd .. "`: " .. tostring(data))
+        end
+    else
+        print("[fnox] warning: `" .. export_cmd .. "` failed: " .. tostring(output))
+    end
+
+    -- create leases and merge credentials
+    local lease_cmd = fnox_bin .. " lease create --all --format json" .. profile_flag
+    local lok, loutput = pcall(function()
+        return cmd.exec(lease_cmd)
+    end)
+    if lok then
+        local ldecode_ok, ldata = pcall(json.decode, loutput)
+        if ldecode_ok then
+            for key, value in pairs(ldata) do
+                if key ~= "backend" and key ~= "lease_id" and type(value) == "string" then
+                    table.insert(env_vars, {key = key, value = value})
+                end
+            end
+        else
+            print("[fnox] warning: failed to parse JSON from `" .. lease_cmd .. "`: " .. tostring(ldata))
+        end
     end
 
     return {
