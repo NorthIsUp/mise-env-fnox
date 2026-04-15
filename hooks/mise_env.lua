@@ -25,11 +25,26 @@ local function exec(command, opts)
     return ok, output
 end
 
-local function get_config_files(fnox_bin, opts)
-    local ok, output = exec(fnox_bin .. " config-files", opts)
+local function run_json(command, opts)
+    local ok, output = exec(command, opts)
     if not ok then
-        print("[fnox] warning: `" .. fnox_bin .. " config-files` failed: " .. tostring(output))
-        return {}
+        error("[fnox] `" .. command .. "` failed: " .. tostring(output))
+    end
+    if not output or output == "" then
+        error("[fnox] `" .. command .. "` returned empty output")
+    end
+    local decode_ok, data = pcall(json.decode, output)
+    if not decode_ok then
+        error("[fnox] failed to parse JSON from `" .. command .. "`: " .. tostring(data))
+    end
+    return data
+end
+
+local function get_config_files(fnox_bin, opts)
+    local command = fnox_bin .. " config-files"
+    local ok, output = exec(command, opts)
+    if not ok then
+        error("[fnox] `" .. command .. "` failed: " .. tostring(output))
     end
     if not output or output == "" then
         return {}
@@ -39,6 +54,20 @@ local function get_config_files(fnox_bin, opts)
         table.insert(files, line)
     end
     return files
+end
+
+local function has_lease_backends(config_files)
+    for _, path in ipairs(config_files) do
+        local f = io.open(path, "r")
+        if f then
+            local content = f:read("*a")
+            f:close()
+            if content and (content:match("%[leases%.") or content:match("%[%[leases")) then
+                return true
+            end
+        end
+    end
+    return false
 end
 
 function PLUGIN:MiseEnv(ctx)
@@ -67,33 +96,19 @@ function PLUGIN:MiseEnv(ctx)
 
     -- export secrets
     local export_cmd = fnox_bin .. " export --format json" .. profile_flag
-    local ok, output = exec(export_cmd, exec_opts)
-    if ok then
-        local decode_ok, data = pcall(json.decode, output)
-        if decode_ok then
-            for key, value in pairs(data.secrets or {}) do
-                table.insert(env_vars, {key = key, value = value})
-            end
-        else
-            print("[fnox] warning: failed to parse JSON from `" .. export_cmd .. "`: " .. tostring(data))
-        end
-    else
-        print("[fnox] warning: `" .. export_cmd .. "` failed: " .. tostring(output))
+    local data = run_json(export_cmd, exec_opts)
+    for key, value in pairs(data.secrets or {}) do
+        table.insert(env_vars, {key = key, value = value})
     end
 
-    -- create leases and merge credentials
-    local lease_cmd = fnox_bin .. " lease create --all --format json" .. profile_flag
-    local lok, loutput = exec(lease_cmd, exec_opts)
-    if lok then
-        local ldecode_ok, ldata = pcall(json.decode, loutput)
-        if ldecode_ok then
-            for key, value in pairs(ldata) do
-                if key ~= "backend" and key ~= "lease_id" and type(value) == "string" then
-                    table.insert(env_vars, {key = key, value = value})
-                end
+    -- create leases (only if any backends are configured)
+    if has_lease_backends(config_files) then
+        local lease_cmd = fnox_bin .. " lease create --all --format json" .. profile_flag
+        local ldata = run_json(lease_cmd, exec_opts)
+        for key, value in pairs(ldata) do
+            if key ~= "backend" and key ~= "lease_id" and type(value) == "string" then
+                table.insert(env_vars, {key = key, value = value})
             end
-        else
-            print("[fnox] warning: failed to parse JSON from `" .. lease_cmd .. "`: " .. tostring(ldata))
         end
     end
 
