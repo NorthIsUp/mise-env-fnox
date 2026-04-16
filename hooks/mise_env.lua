@@ -31,7 +31,7 @@ local function run_json(command, opts)
         error("[fnox] `" .. command .. "` failed: " .. tostring(output))
     end
     if not output or output == "" then
-        error("[fnox] `" .. command .. "` returned empty output")
+        return {}
     end
     local decode_ok, data = pcall(json.decode, output)
     if not decode_ok then
@@ -44,7 +44,8 @@ local function get_config_files(fnox_bin, opts)
     local command = fnox_bin .. " config-files"
     local ok, output = exec(command, opts)
     if not ok then
-        error("[fnox] `" .. command .. "` failed: " .. tostring(output))
+        print("[fnox] warning: `" .. command .. "` failed: " .. tostring(output))
+        return nil
     end
     if not output or output == "" then
         return {}
@@ -83,6 +84,11 @@ function PLUGIN:MiseEnv(ctx)
     end
 
     local config_files = get_config_files(fnox_bin, exec_opts)
+    if not config_files then
+        -- config-files failed; return a non-cacheable empty result so mise
+        -- proceeds and retries on the next activation
+        return {cacheable = false, watch_files = {}, env = {}}
+    end
     if #config_files == 0 then
         return {cacheable = true, watch_files = {}, env = {}}
     end
@@ -93,27 +99,41 @@ function PLUGIN:MiseEnv(ctx)
     end
 
     local env_vars = {}
+    local had_failure = false
 
-    -- export secrets
+    -- export secrets: failures are surfaced as warnings, not errors, so a
+    -- broken fnox invocation never blocks mise from progressing
     local export_cmd = fnox_bin .. " export --format json" .. profile_flag
-    local data = run_json(export_cmd, exec_opts)
-    for key, value in pairs(data.secrets or {}) do
-        table.insert(env_vars, {key = key, value = value})
+    local eok, edata = pcall(run_json, export_cmd, exec_opts)
+    if eok then
+        for key, value in pairs(edata.secrets or {}) do
+            table.insert(env_vars, {key = key, value = value})
+        end
+    else
+        had_failure = true
+        print("[fnox] warning: export failed, continuing without secrets: " .. tostring(edata))
     end
 
-    -- create leases (only if any backends are configured)
+    -- create leases (only if any backends are configured); same policy as
+    -- export — warn on failure, never block mise
     if has_lease_backends(config_files) then
         local lease_cmd = fnox_bin .. " lease create --all --format json" .. profile_flag
-        local ldata = run_json(lease_cmd, exec_opts)
-        for key, value in pairs(ldata) do
-            if key ~= "backend" and key ~= "lease_id" and type(value) == "string" then
-                table.insert(env_vars, {key = key, value = value})
+        local lok, ldata = pcall(run_json, lease_cmd, exec_opts)
+        if lok then
+            for key, value in pairs(ldata) do
+                if key ~= "backend" and key ~= "lease_id" and type(value) == "string" then
+                    table.insert(env_vars, {key = key, value = value})
+                end
             end
+        else
+            had_failure = true
+            print("[fnox] warning: lease creation failed, continuing without lease credentials: " .. tostring(ldata))
         end
     end
 
     return {
-        cacheable = true,
+        -- don't cache partial results so mise retries after a transient failure
+        cacheable = not had_failure,
         watch_files = config_files,
         env = env_vars,
         redact = true
