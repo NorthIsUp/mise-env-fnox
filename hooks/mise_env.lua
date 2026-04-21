@@ -3,10 +3,13 @@ local json = require("json")
 
 local function resolve_fnox_bin(fnox_bin)
     local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
+    -- Prefer the shim (which respects mise's version resolution, honoring
+    -- project-level pins) over `installs/latest` (managed by mise's default
+    -- alias — wrong when the user has pinned to a non-latest version).
     local candidates = {
         fnox_bin,
-        home .. "/.local/share/mise/installs/fnox/latest/fnox",
         home .. "/.local/share/mise/shims/fnox",
+        home .. "/.local/share/mise/installs/fnox/latest/fnox",
     }
     for _, path in ipairs(candidates) do
         local f = io.open(path, "r")
