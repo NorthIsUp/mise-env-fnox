@@ -18,6 +18,11 @@ local function resolve_fnox_bin(fnox_bin)
     return fnox_bin
 end
 
+local function strip_traceback(msg)
+    if not msg then return "" end
+    return (tostring(msg):gsub("\r?\n%s*stack traceback:.*$", ""))
+end
+
 local function exec(command, opts)
     local ok, output = pcall(function()
         return cmd.exec(command, opts)
@@ -44,7 +49,7 @@ local function get_config_files(fnox_bin, opts)
     local command = fnox_bin .. " config-files"
     local ok, output = exec(command, opts)
     if not ok then
-        print("[fnox] warning: `" .. command .. "` failed: " .. tostring(output))
+        print("[fnox] warning: `" .. command .. "` failed: " .. strip_traceback(output))
         return nil
     end
     if not output or output == "" then
@@ -111,7 +116,7 @@ function PLUGIN:MiseEnv(ctx)
         end
     else
         had_failure = true
-        print("[fnox] warning: export failed, continuing without secrets: " .. tostring(edata))
+        print("[fnox] warning: export failed, continuing without secrets: " .. strip_traceback(edata))
     end
 
     -- create leases (only if any backends are configured); same policy as
@@ -127,7 +132,7 @@ function PLUGIN:MiseEnv(ctx)
             end
         else
             had_failure = true
-            print("[fnox] warning: lease creation failed, continuing without lease credentials: " .. tostring(ldata))
+            print("[fnox] warning: lease creation failed, continuing without lease credentials: " .. strip_traceback(ldata))
         end
     end
 
