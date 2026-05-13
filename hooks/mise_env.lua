@@ -1,25 +1,6 @@
 local cmd = require("cmd")
 local json = require("json")
 
--- Resolve a usable fnox path when mise's `tools = true` PATH injection
--- doesn't reach the lua subprocess (a bug in mise 2026.4.6+).
-local function resolve_fnox_bin(fnox_bin)
-    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
-    local candidates = {
-        fnox_bin,
-        home .. "/.local/share/mise/installs/fnox/latest/fnox",
-        home .. "/.local/share/mise/shims/fnox",
-    }
-    for _, path in ipairs(candidates) do
-        local f = io.open(path, "r")
-        if f then
-            f:close()
-            return path
-        end
-    end
-    return fnox_bin
-end
-
 local function strip_traceback(msg)
     if not msg then return "" end
     return (tostring(msg):gsub("\r?\n%s*stack traceback:.*$", ""))
@@ -50,22 +31,15 @@ local function timeout_bin()
     return nil
 end
 
--- Build a shell command string that:
---   1. Prepends fnox's parent dir to PATH (without replacing the rest of env)
---   2. Wraps in `timeout` if available so a stalled network call can't hang
---      mise activation indefinitely.
+-- Build a shell command, wrapped in `timeout` if available so a stalled
+-- network call can't hang mise activation indefinitely.
 local function build_command(fnox_bin, args, timeout_secs)
-    local fnox_dir = fnox_bin:match("(.+)/[^/]+$")
-    local prefix = ""
-    if fnox_dir then
-        prefix = "PATH=" .. shquote(fnox_dir) .. ':"$PATH" '
-    end
     local body = shquote(fnox_bin) .. " " .. args
     local tbin = timeout_bin()
     if tbin and timeout_secs then
         body = tbin .. " --preserve-status " .. timeout_secs .. " " .. body
     end
-    return prefix .. body
+    return body
 end
 
 local function exec(command)
@@ -127,7 +101,7 @@ local function has_lease_backends(config_files)
 end
 
 function PLUGIN:MiseEnv(ctx)
-    local fnox_bin = resolve_fnox_bin(ctx.options.fnox_bin or "fnox")
+    local fnox_bin = ctx.options.fnox_bin or "fnox"
     local profile = ctx.options.profile
     local export_timeout = tonumber(ctx.options.export_timeout) or 15
     local lease_timeout = tonumber(ctx.options.lease_timeout) or 30
