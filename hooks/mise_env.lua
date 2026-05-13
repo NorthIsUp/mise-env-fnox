@@ -65,15 +65,13 @@ local function run_json(command)
 end
 
 -- Run a fnox subcommand that emits JSON. Returns (data, err) where err is
--- non-nil only on an unexpected failure (the warning has already been
--- printed in that case). If `ignore_re` matches the failure message, the
--- error is treated as an expected no-op: returns (nil, nil) silently.
-local function fetch_json(label, fnox_bin, args, timeout_secs, ignore_re)
+-- non-nil only on failure (the warning has already been printed in that
+-- case). Never throws.
+local function fetch_json(label, fnox_bin, args, timeout_secs)
     local command = build_command(fnox_bin, args, timeout_secs)
     local ok, data = pcall(run_json, command)
     if ok then return data, nil end
     local msg = strip_traceback(tostring(data))
-    if ignore_re and msg:find(ignore_re) then return nil, nil end
     print("[fnox] warning: " .. label .. " failed, continuing: " .. msg)
     return nil, msg
 end
@@ -133,6 +131,9 @@ end
 function PLUGIN:MiseEnv(ctx)
     local fnox_bin = ctx.options.fnox_bin or "fnox"
     local profile = ctx.options.profile
+    -- opt-in: `leases = true` to run `fnox lease create --all` on activation.
+    -- Off by default so users without [leases.*] backends don't see warnings.
+    local leases_enabled = ctx.options.leases == true or ctx.options.leases == "true"
     local export_timeout = tonumber(ctx.options.export_timeout) or 15
     local lease_timeout = tonumber(ctx.options.lease_timeout) or 30
 
@@ -161,13 +162,13 @@ function PLUGIN:MiseEnv(ctx)
     if edata then merge_creds(env_vars, seen, edata.secrets or {}, nil) end
     if eerr then had_failure = true end
 
-    -- create leases. Silently skip when no [leases.*] backends are
-    -- configured (fnox returns a specific config error in that case).
-    local ldata, lerr = fetch_json("lease creation", fnox_bin,
-        "lease create --all --format json" .. profile_args, lease_timeout,
-        "No lease backends configured")
-    if ldata then merge_creds(env_vars, seen, lease_creds(ldata), "lease") end
-    if lerr then had_failure = true end
+    -- create leases (opt-in via `leases = true` plugin option)
+    if leases_enabled then
+        local ldata, lerr = fetch_json("lease creation", fnox_bin,
+            "lease create --all --format json" .. profile_args, lease_timeout)
+        if ldata then merge_creds(env_vars, seen, lease_creds(ldata), "lease") end
+        if lerr then had_failure = true end
+    end
 
     return {
         -- don't cache partial results so mise retries after a transient failure
