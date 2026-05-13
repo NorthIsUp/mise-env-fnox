@@ -64,17 +64,18 @@ local function run_json(command)
     return data
 end
 
--- Run a fnox subcommand that emits JSON. On failure, prints a warning
--- naming `label` and returns nil so the caller can flag had_failure but
--- keep going. Never throws.
-local function fetch_json(label, fnox_bin, args, timeout_secs)
+-- Run a fnox subcommand that emits JSON. Returns (data, err) where err is
+-- non-nil only on an unexpected failure (the warning has already been
+-- printed in that case). If `ignore_re` matches the failure message, the
+-- error is treated as an expected no-op: returns (nil, nil) silently.
+local function fetch_json(label, fnox_bin, args, timeout_secs, ignore_re)
     local command = build_command(fnox_bin, args, timeout_secs)
     local ok, data = pcall(run_json, command)
-    if not ok then
-        print("[fnox] warning: " .. label .. " failed, continuing: " .. strip_traceback(data))
-        return nil
-    end
-    return data
+    if ok then return data, nil end
+    local msg = strip_traceback(tostring(data))
+    if ignore_re and msg:find(ignore_re) then return nil, nil end
+    print("[fnox] warning: " .. label .. " failed, continuing: " .. msg)
+    return nil, msg
 end
 
 -- Merge a {key=value} map into env_vars, replacing any prior entry with
@@ -117,25 +118,6 @@ local function get_config_files(fnox_bin)
     return files
 end
 
--- TOML section headers must start at column 0. Anchor the pattern so
--- `[leases.x]` inside a comment or multi-line string can't false-positive.
-local function has_lease_backends(config_files)
-    for _, path in ipairs(config_files) do
-        local f = io.open(path, "r")
-        if f then
-            local content = f:read("*a")
-            f:close()
-            if content and (content:match("\n%s*%[leases%.")
-                         or content:match("^%s*%[leases%.")
-                         or content:match("\n%s*%[%[leases")
-                         or content:match("^%s*%[%[leases")) then
-                return true
-            end
-        end
-    end
-    return false
-end
-
 -- Strip lease metadata keys and keep only string values, then return a
 -- plain {key=value} map suitable for merge_creds.
 local function lease_creds(ldata)
@@ -174,24 +156,18 @@ function PLUGIN:MiseEnv(ctx)
     local had_failure = false
 
     -- export secrets
-    local edata = fetch_json("export", fnox_bin,
+    local edata, eerr = fetch_json("export", fnox_bin,
         "export --format json" .. profile_args, export_timeout)
-    if edata then
-        merge_creds(env_vars, seen, edata.secrets or {}, nil)
-    else
-        had_failure = true
-    end
+    if edata then merge_creds(env_vars, seen, edata.secrets or {}, nil) end
+    if eerr then had_failure = true end
 
-    -- create leases (only if any backends are configured)
-    if has_lease_backends(config_files) then
-        local ldata = fetch_json("lease creation", fnox_bin,
-            "lease create --all --format json" .. profile_args, lease_timeout)
-        if ldata then
-            merge_creds(env_vars, seen, lease_creds(ldata), "lease")
-        else
-            had_failure = true
-        end
-    end
+    -- create leases. Silently skip when no [leases.*] backends are
+    -- configured (fnox returns a specific config error in that case).
+    local ldata, lerr = fetch_json("lease creation", fnox_bin,
+        "lease create --all --format json" .. profile_args, lease_timeout,
+        "No lease backends configured")
+    if ldata then merge_creds(env_vars, seen, lease_creds(ldata), "lease") end
+    if lerr then had_failure = true end
 
     return {
         -- don't cache partial results so mise retries after a transient failure
