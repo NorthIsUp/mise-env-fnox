@@ -64,6 +64,42 @@ local function run_json(command)
     return data
 end
 
+-- Run a fnox subcommand that emits JSON. On failure, prints a warning
+-- naming `label` and returns nil so the caller can flag had_failure but
+-- keep going. Never throws.
+local function fetch_json(label, fnox_bin, args, timeout_secs)
+    local command = build_command(fnox_bin, args, timeout_secs)
+    local ok, data = pcall(run_json, command)
+    if not ok then
+        print("[fnox] warning: " .. label .. " failed, continuing: " .. strip_traceback(data))
+        return nil
+    end
+    return data
+end
+
+-- Merge a {key=value} map into env_vars, replacing any prior entry with
+-- the same key. Warns on collision when source_label is set.
+local function merge_creds(env_vars, seen, creds, source_label)
+    for key, value in pairs(creds) do
+        if seen[key] and source_label then
+            print("[fnox] warning: " .. source_label
+                .. " credential `" .. key .. "` overrides earlier value")
+        end
+        local replaced = false
+        for i, entry in ipairs(env_vars) do
+            if entry.key == key then
+                env_vars[i] = {key = key, value = value}
+                replaced = true
+                break
+            end
+        end
+        if not replaced then
+            table.insert(env_vars, {key = key, value = value})
+        end
+        seen[key] = true
+    end
+end
+
 local function get_config_files(fnox_bin)
     local command = build_command(fnox_bin, "config-files", 5)
     local ok, output = exec(command)
@@ -100,6 +136,18 @@ local function has_lease_backends(config_files)
     return false
 end
 
+-- Strip lease metadata keys and keep only string values, then return a
+-- plain {key=value} map suitable for merge_creds.
+local function lease_creds(ldata)
+    local out = {}
+    for key, value in pairs(ldata) do
+        if key ~= "backend" and key ~= "lease_id" and type(value) == "string" then
+            out[key] = value
+        end
+    end
+    return out
+end
+
 function PLUGIN:MiseEnv(ctx)
     local fnox_bin = ctx.options.fnox_bin or "fnox"
     local profile = ctx.options.profile
@@ -125,47 +173,23 @@ function PLUGIN:MiseEnv(ctx)
     local seen = {}
     local had_failure = false
 
-    -- export secrets: failures are surfaced as warnings, not errors, so a
-    -- broken fnox invocation never blocks mise from progressing
-    local export_cmd = build_command(fnox_bin, "export --format json" .. profile_args, export_timeout)
-    local eok, edata = pcall(run_json, export_cmd)
-    if eok then
-        for key, value in pairs(edata.secrets or {}) do
-            if not seen[key] then
-                seen[key] = true
-                table.insert(env_vars, {key = key, value = value})
-            end
-        end
+    -- export secrets
+    local edata = fetch_json("export", fnox_bin,
+        "export --format json" .. profile_args, export_timeout)
+    if edata then
+        merge_creds(env_vars, seen, edata.secrets or {}, nil)
     else
         had_failure = true
-        print("[fnox] warning: export failed, continuing without secrets: " .. strip_traceback(edata))
     end
 
-    -- create leases (only if any backends are configured); same policy as
-    -- export -- warn on failure, never block mise
+    -- create leases (only if any backends are configured)
     if has_lease_backends(config_files) then
-        local lease_cmd = build_command(fnox_bin, "lease create --all --format json" .. profile_args, lease_timeout)
-        local lok, ldata = pcall(run_json, lease_cmd)
-        if lok then
-            for key, value in pairs(ldata) do
-                if key ~= "backend" and key ~= "lease_id" and type(value) == "string" then
-                    if seen[key] then
-                        print("[fnox] warning: lease credential `" .. key .. "` overrides exported secret")
-                        for i, entry in ipairs(env_vars) do
-                            if entry.key == key then
-                                env_vars[i] = {key = key, value = value}
-                                break
-                            end
-                        end
-                    else
-                        seen[key] = true
-                        table.insert(env_vars, {key = key, value = value})
-                    end
-                end
-            end
+        local ldata = fetch_json("lease creation", fnox_bin,
+            "lease create --all --format json" .. profile_args, lease_timeout)
+        if ldata then
+            merge_creds(env_vars, seen, lease_creds(ldata), "lease")
         else
             had_failure = true
-            print("[fnox] warning: lease creation failed, continuing without lease credentials: " .. strip_traceback(ldata))
         end
     end
 
